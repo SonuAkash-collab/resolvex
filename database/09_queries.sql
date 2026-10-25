@@ -219,3 +219,17 @@ SELECT tablename, indexname,
   FROM pg_indexes
  WHERE schemaname = 'public' AND indexname NOT LIKE '%_pkey'
  ORDER BY tablename, indexname;
+
+-- @q q22 | Row-Level Security policies (RBAC inside PostgreSQL) | pg_policies catalog, RLS
+SELECT tablename AS table_name, policyname AS policy, cmd AS applies_to,
+       COALESCE(qual, with_check) AS rule
+  FROM pg_policies
+ WHERE schemaname = 'public'
+ ORDER BY tablename, cmd, policyname;
+
+-- @q q23 | Vector store health (fresh / stale / missing embeddings) | pgvector vector_dims, vector_norm, view
+SELECT vector_status, COUNT(*) AS incidents, MIN(dims) AS dims,
+       ROUND(AVG(norm), 4) AS avg_norm, MAX(embedded_at)::TIMESTAMP(0) AS last_embedded
+  FROM v_embedding_status
+ GROUP BY vector_status
+ ORDER BY vector_status;

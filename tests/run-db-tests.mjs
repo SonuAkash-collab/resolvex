@@ -246,6 +246,106 @@ const tests = [
       await c.query(`UPDATE spare_parts SET quantity_in_stock = 0`);
     },
     expectError: "read-only transaction" },
+
+  // ---------------------------------------------------------------- RBAC in the database (Row-Level Security)
+  // these run as the web app's restricted login; "as" = app.current_user_id of the request
+  // users: 1 admin, 2 manager, 4 technician (Ravi), 7 technician (Priya), 11 student, 12 student, 21 deactivated
+  { id: "T36", area: "RLS", name: "Without a logged-in user the app role sees no rows", app: true, as: "",
+    run: async (c) => (await c.query("SELECT COUNT(*)::INT n FROM incidents")).rows[0].n,
+    check: (n) => n === 0, show: (n) => `${n} incidents visible` },
+  { id: "T37", area: "RLS", name: "A student sees only their own notifications", app: true, as: 11,
+    run: async (c) => {
+      const own = (await c.query("SELECT COUNT(*)::INT n FROM alerts")).rows[0].n;
+      const others = (await c.query("SELECT COUNT(*)::INT n FROM alerts WHERE target_user_id IS DISTINCT FROM 11 AND target_role IS DISTINCT FROM 'STUDENT_STAFF'")).rows[0].n;
+      await c.query("SELECT set_config('app.current_user_id', '1', true)");
+      const all = (await c.query("SELECT COUNT(*)::INT n FROM alerts")).rows[0].n;
+      return { own, others, all };
+    },
+    check: (r) => r.others === 0 && r.all > r.own, show: (r) => `student sees ${r.own}, other people's: ${r.others}; admin sees ${r.all}` },
+  { id: "T38", area: "RLS", name: "A student cannot file a report in someone else's name", app: true, as: 11,
+    run: (c) => c.query("INSERT INTO incidents (title, description, reported_by, room_id, category_id, severity) VALUES ('Fake report', 'Pretending to be user 12', 12, 1, 2, 2)"),
+    expectError: "row-level security" },
+  { id: "T39", area: "RLS", name: "A student cannot change another person's incident", app: true, as: 11,
+    run: async (c) => (await c.query("UPDATE incidents SET severity = 1 WHERE reported_by <> 11")).rowCount,
+    check: (n) => n === 0, show: (n) => `${n} rows changed` },
+  { id: "T40", area: "RLS", name: "A technician cannot update another technician's work order", app: true, as: 4,
+    run: async (c) => (await c.query("UPDATE work_orders SET labour_hours = 9 WHERE technician_id <> 4")).rowCount,
+    check: (n) => n === 0, show: (n) => `${n} rows changed` },
+  { id: "T41", area: "RLS", name: "Only an admin can create buildings", app: true, as: 2,
+    run: (c) => c.query("INSERT INTO buildings (building_code, building_name, building_type, total_floors) VALUES ('ZZ', 'Manager building', 'LAB', 1)"),
+    expectError: "row-level security" },
+  { id: "T42", area: "RLS", name: "Only an admin can read the audit log", app: true, as: 2,
+    run: async (c) => {
+      await c.query("CALL sp_restock_part(3, 5)");                                   // creates an audit row
+      const mgr = (await c.query("SELECT COUNT(*)::INT n FROM audit_log")).rows[0].n;
+      await c.query("SELECT set_config('app.current_user_id', '1', true)");
+      const adm = (await c.query("SELECT COUNT(*)::INT n FROM audit_log")).rows[0].n;
+      return { mgr, adm };
+    },
+    check: (r) => r.mgr === 0 && r.adm > 0, show: (r) => `manager sees ${r.mgr}, admin sees ${r.adm}` },
+  { id: "T43", area: "RLS", name: "A deactivated user loses all database access at once", app: true, as: 21,
+    run: async (c) => (await c.query("SELECT COUNT(*)::INT n FROM incidents")).rows[0].n,
+    check: (n) => n === 0, show: (n) => `${n} incidents visible` },
+  { id: "T44", area: "Column privilege", name: "The app role cannot read password hashes", app: true, as: 1,
+    run: (c) => c.query("SELECT password_hash FROM users LIMIT 1"),
+    expectError: "permission denied" },
+  { id: "T45", area: "RLS (vector)", name: "Only an admin can delete vectors", app: true, as: 11,
+    run: async (c) => (await c.query("DELETE FROM incident_embeddings")).rowCount,
+    check: (n) => n === 0, show: (n) => `${n} vectors deleted by a student` },
+  { id: "T46", area: "RLS (vector)", name: "Only the reporter (or a manager) may re-embed an incident's vector", app: true, as: 11,
+    run: async (c) => {
+      const own = (await c.query("UPDATE incident_embeddings SET embedded_at = now() WHERE incident_id = 167")).rowCount;
+      await c.query("SELECT set_config('app.current_user_id', '12', true)");
+      const other = (await c.query("UPDATE incident_embeddings SET embedded_at = now() WHERE incident_id = 167")).rowCount;
+      return { own, other };
+    },
+    check: (r) => r.own === 1 && r.other === 0, show: (r) => `reporter updated ${r.own}, another student ${r.other}` },
+  { id: "T47", area: "RLS + procedures", name: "Assignment and completion still work under RLS for the right roles", app: true, as: 2,
+    run: async (c) => {
+      const wo = (await c.query("CALL sp_assign_technician(158, 2, 6, NULL)")).rows[0].p_work_order_id;   // benches -> Suresh
+      await c.query("SELECT set_config('app.current_user_id', '6', true)");                               // act as Suresh
+      await c.query("CALL sp_complete_work_order($1, 6, 1.5, 'Repaired bench joints and planks', '[]')", [wo]);
+      return (await c.query("SELECT status FROM incidents WHERE incident_id = 158")).rows[0].status;
+    },
+    check: (s) => s === "RESOLVED", show: (s) => `manager assigned, technician completed, incident ${s}` },
+
+  // ---------------------------------------------------------------- vector store RUD
+  { id: "T48", area: "Vector READ", name: "Every vector has 384 dimensions and unit length",
+    run: async (c) => (await c.query("SELECT COUNT(*) FILTER (WHERE vector_dims(embedding) <> 384 OR abs(vector_norm(embedding) - 1) > 0.001)::INT bad, COUNT(*)::INT n FROM incident_embeddings")).rows[0],
+    check: (r) => r.bad === 0 && r.n > 0, show: (r) => `${r.n} vectors, ${r.bad} malformed` },
+  { id: "T49", area: "Vector UPDATE", name: "Changed text is detected as STALE and becomes FRESH after re-embedding",
+    run: async (c) => {
+      await c.query("UPDATE incidents SET description = 'The AC in the lab is making a loud noise and leaking water' WHERE incident_id = 168");
+      const before = (await c.query("SELECT vector_status FROM v_embedding_status WHERE incident_id = 168")).rows[0].vector_status;
+      await c.query(`UPDATE incident_embeddings e
+                        SET embedding = (SELECT embedding FROM incident_embeddings WHERE incident_id = 160),
+                            source_text = concat_ws('. ', i.title, i.description, c.category_name), embedded_at = now()
+                       FROM incidents i JOIN asset_categories c ON c.category_id = i.category_id
+                      WHERE i.incident_id = e.incident_id AND e.incident_id = 168`);
+      const after = (await c.query("SELECT vector_status FROM v_embedding_status WHERE incident_id = 168")).rows[0].vector_status;
+      return { before, after };
+    },
+    check: (r) => r.before === "STALE" && r.after === "FRESH", show: (r) => `${r.before} -> ${r.after}` },
+  { id: "T50", area: "Vector DELETE", name: "A deleted vector drops out of similarity search; the incident stays",
+    run: async (c) => {
+      const q = "SELECT COUNT(*)::INT n FROM incident_embeddings e, LATERAL fn_similar_incidents(e.embedding, 20, 0.0, e.incident_id) s WHERE e.incident_id = 119 AND s.incident_id = 97";
+      const before = (await c.query(q)).rows[0].n;
+      await c.query("DELETE FROM incident_embeddings WHERE incident_id = 97");
+      const after = (await c.query(q)).rows[0].n;
+      const status = (await c.query("SELECT vector_status FROM v_embedding_status WHERE incident_id = 97")).rows[0].vector_status;
+      const stillThere = (await c.query("SELECT COUNT(*)::INT n FROM incidents WHERE incident_id = 97")).rows[0].n;
+      return { before, after, status, stillThere };
+    },
+    check: (r) => r.before === 1 && r.after === 0 && r.status === "MISSING" && r.stillThere === 1,
+    show: (r) => `found before ${r.before}, after ${r.after}; status ${r.status}; incident kept` },
+  { id: "T51", area: "Vector DELETE (cascade)", name: "Deleting an incident deletes its vector (ON DELETE CASCADE)",
+    run: async (c) => {
+      const inc = (await c.query(NEW_INCIDENT)).rows[0].incident_id;
+      await c.query("INSERT INTO incident_embeddings (incident_id, embedding, source_text) SELECT $1, embedding, 'copy' FROM incident_embeddings WHERE incident_id = 168", [inc]);
+      await c.query("DELETE FROM incidents WHERE incident_id = $1", [inc]);
+      return (await c.query("SELECT COUNT(*)::INT n FROM incident_embeddings WHERE incident_id = $1", [inc])).rows[0].n;
+    },
+    check: (n) => n === 0, show: (n) => `${n} orphan vectors` },
 ];
 
 async function main() {
@@ -260,7 +360,7 @@ async function main() {
     let pass = false;
     let detail = "";
     await c.query("BEGIN");
-    await c.query("SELECT set_config('app.current_user_id', '1', true)");
+    await c.query("SELECT set_config('app.current_user_id', $1, true)", [String(t.as ?? 1)]);
     try {
       const out = await t.run(c);
       if (t.expectError !== undefined) {

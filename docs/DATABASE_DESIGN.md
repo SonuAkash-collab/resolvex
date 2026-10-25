@@ -180,6 +180,7 @@ Validation happens in the database, so no client (the app, psql, a script) can s
 | `v_maintenance_cost_summary` | cost per month / building / category | `date_trunc`, GROUP BY |
 | `v_sla_compliance` | % resolved within SLA per priority | conditional aggregation |
 | `v_low_stock_parts` | parts at or below reorder level | |
+| `v_embedding_status` | vector store health: FRESH / STALE (text changed after embedding) / MISSING | LEFT JOIN, `vector_dims`, `vector_norm`, CASE |
 | `mv_monthly_incident_stats` | monthly trend (materialized; refreshed concurrently) | unique index enables `REFRESH ... CONCURRENTLY` |
 
 ## 10. Functions and stored procedures
@@ -194,6 +195,8 @@ Validation happens in the database, so no client (the app, psql, a script) can s
 | `fn_hybrid_search` | function (table) | vector search + full-text search fused by Reciprocal Rank Fusion |
 | `fn_current_app_user` | function | reads the acting user id set per transaction (used by audit and history triggers) |
 | `fn_refresh_monthly_stats` | function, SECURITY DEFINER | lets the restricted app role refresh the materialized view |
+| `fn_current_app_role` | function, SECURITY DEFINER | role of the logged-in user, looked up from `users` (used by every RLS policy) |
+| `fn_login_lookup` | function, SECURITY DEFINER | returns one user's bcrypt hash for login; the app role cannot read the hash column itself |
 | `sp_assign_technician` | procedure | locks the incident, picks the best skilled, least loaded technician (`FOR UPDATE`), creates the work order |
 | `sp_complete_work_order` | procedure | the core transaction (section 12) |
 | `sp_mark_duplicate` | procedure | recursive CTE finds the root original, links the duplicate, adds the reporter as co-reporter |
@@ -231,19 +234,37 @@ Any failure rolls back every step. Screenshot 13 and test T23 show this: asking 
 
 Every API transaction first runs `SELECT set_config('app.current_user_id', <id>, true)`. Triggers therefore know who made the change without trusting anything the client sends.
 
-## 13. Security in the database
+## 13. Security and role-based access control in the database
 
-- Least privilege. The web app connects as a login that belongs to `resolvex_app`. That role has DML and EXECUTE only: no DDL, no UPDATE or DELETE on `audit_log` or `incident_status_history` (append-only), and no writes to `roles` or the state machine.
-- `resolvex_readonly` can only SELECT the reporting views.
-- Passwords: bcrypt hashes only, and a CHECK constraint rejects any value that is not a bcrypt hash.
-- Audit: every change to users, assets, spare parts, work orders, technicians and SLA policies is logged with the acting user.
-- SQL injection: the app only sends parameterised statements (`$1, $2`). The showcase page runs its fixed queries inside `BEGIN TRANSACTION READ ONLY`.
+### Privileges
+- **Least privilege.** The web app connects as a login that belongs to `resolvex_app`. That role has DML and EXECUTE only: no DDL, and no writes to `roles` or the state machine.
+- **Password hashes are hidden.** The app role has column-level SELECT on `users` without `password_hash`. Login reads one hash through the SECURITY DEFINER function `fn_login_lookup`. A CHECK constraint rejects anything that is not a bcrypt hash.
+- **History cannot be forged.** `audit_log` and `incident_status_history` are written only by SECURITY DEFINER trigger functions. The app role has no INSERT, UPDATE or DELETE on them.
+- **SQL injection:** only parameterised statements (`$1, $2`). The showcase page runs its fixed queries inside `BEGIN TRANSACTION READ ONLY`.
+
+### Row-Level Security (65 policies on 18 tables)
+Every API request runs its SQL inside a transaction that first sets `app.current_user_id` (`lib/db.js`). The policies call `fn_current_app_role()`, which looks the role up in the `users` table, so the role is never trusted from the client. A deactivated user gets no role.
+
+| Rule | Tables | Effect |
+|---|---|---|
+| Logged-in, active users only | all 18 | no user, or a deactivated user → zero rows |
+| Master data is admin-only | users, buildings, rooms, asset_categories, sla_policies, technician_skills | INSERT / UPDATE / DELETE only for ADMIN |
+| Report only in your own name | incidents | INSERT requires `reported_by = current user` |
+| Change only what is yours | incidents | UPDATE: the reporter, a technician with a work order on it, or a manager / admin |
+| Technicians own their jobs | work_orders | UPDATE: the assigned technician or a manager; INSERT: managers only |
+| Inventory | spare_parts, assets, work_order_parts, maintenance_records | students cannot change them; delete is admin-only |
+| Vector store | incident_embeddings | INSERT / UPDATE (re-embed): the reporter or a manager; DELETE: admin only |
+| Confirmations | incident_reporters | add or withdraw only your own |
+| Private notifications | alerts | see, mark and delete only alerts for you or your role |
+| Audit trail | audit_log | readable by ADMIN only |
+
+Triggers that act on behalf of the system are SECURITY DEFINER, so they keep working under RLS. One example is the "me too" counter updating someone else's incident. Proof: tests T36-T47; showcase query q22 lists every policy; section 10 of `database/10_viva_live_demo.sql` shows it live in psql.
 
 ## 14. DML coverage
 
 | Operation | Where |
 |---|---|
 | INSERT | report incident (+ embedding), confirm incident, create user (+ technician + skills), add asset / part / building / room, work order (procedure), parts used, maintenance record, alerts, audit rows |
-| UPDATE | status changes, close / reopen / feedback, severity re-classification, start / hold / resume work, stock deduction and restock, SLA policy edits, user activation, technician availability, escalation |
-| DELETE | withdraw a confirmation (`incident_reporters`, trigger lowers affected users), delete read notifications (`alerts`), delete an unused spare part (refused by the FK if the part was used), seed rebuild of history |
+| UPDATE | edit an incident's text + re-embed its vector, status changes, close / reopen / feedback, severity re-classification, start / hold / resume work, stock deduction and restock, SLA policy edits, user activation, technician availability, escalation |
+| DELETE | withdraw a confirmation (`incident_reporters`, trigger lowers affected users), delete read notifications (`alerts`), delete a vector (`incident_embeddings`, admin), delete an unused spare part (refused by the FK if the part was used), seed rebuild of history |
 | SELECT | every page; joins, GROUP BY / HAVING, ORDER BY, aggregates, subqueries, window functions, CTEs, ROLLUP (see `database/09_queries.sql`) |

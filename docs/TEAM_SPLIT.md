@@ -8,8 +8,8 @@ The brief asks that **each member works on both the database and the application
 |---|---|---|
 | **Tables** | incidents, incident_embeddings, incident_reporters, incident_status_history, incident_status_transitions, sla_policies | roles, users, technicians, technician_skills, buildings, rooms, asset_categories, assets, work_orders, spare_parts, work_order_parts, maintenance_records, alerts, audit_log |
 | **SQL logic** | fn_priority_breakdown / score / level, fn_similar_incidents, fn_detect_duplicates, fn_hybrid_search, sp_mark_duplicate, sp_escalate_overdue; triggers trg_incident_* ; views v_incident_details, v_critical_incidents, v_sla_compliance; HNSW + GIN indexes | fn_asset_risk_score, sp_assign_technician, sp_complete_work_order, sp_schedule_preventive_maintenance, sp_restock_part; triggers trg_technician_role, trg_work_order_*, trg_low_stock_alert, trg_audit_*; views v_technician_workload, v_asset_health, v_maintenance_cost_summary, v_low_stock_parts, materialized view; 07_security.sql |
-| **API** | /api/incidents/**, /api/search, /api/alerts, /api/meta | /api/auth/**, /api/work-orders/**, /api/parts/**, /api/assets/**, /api/users/**, /api/campus, /api/maintenance, /api/analytics, /api/audit, /api/showcase |
-| **Pages** | report, my reports, search, incidents list + detail, priority queue, notifications | login, work orders, spare parts, asset health, analytics, admin users / campus / audit, DB showcase |
+| **API** | /api/incidents/**, /api/search, /api/alerts, /api/meta, /api/vectors/** | /api/auth/**, /api/work-orders/**, /api/parts/**, /api/assets/**, /api/users/**, /api/campus, /api/maintenance, /api/analytics, /api/reports, /api/audit, /api/showcase |
+| **Pages** | report, my reports, search, incidents list + detail (incl. edit + re-embed), priority queue, notifications, vector store | login, work orders, spare parts, asset health, analytics, reports, admin users / campus / audit, DB showcase |
 | **Lib** | lib/embeddings.js, lib/incidents.js, components/IncidentTable.js | lib/db.js, lib/auth.js, lib/api.js, middleware.js, components/Shell.js |
 | **Tests and docs** | T04-T18, T25, T27-T29; docs/VECTOR_SEARCH.md | T01-T03, T19-T24, T26, T29b-T35, API tests; docs/DATABASE_DESIGN.md |
 | **Together** | ER diagram and schema review, 01_schema.sql, seed generator, README, report | |
@@ -58,6 +58,10 @@ Commit in this order. Each step lists who commits and which files. Read and run 
 | 20 | M1 | docs/VECTOR_SEARCH.md, docs/diagrams/** | docs: vector search design, ER and architecture diagrams |
 | 21 | M2 | docs/DATABASE_DESIGN.md, docs/DATA_DICTIONARY.md, docs/TEST_RESULTS_*.md, docs/screenshots/** | docs: database design, data dictionary, test results, screenshots |
 | 22 | both | docs/DEMO_GUIDE.md, docs/TEAM_SPLIT.md, report | docs: demo guide and team split |
+| 23 | M2 | database/07_security.sql (Row-Level Security part), lib/context.js, lib/db.js, lib/api.js, lib/auth.js, app/api/auth/login | feat(db): role-based access control with row-level security |
+| 24 | M1 | database/06_views.sql (v_embedding_status), app/api/vectors/**, app/(app)/vectors, app/api/incidents/[id] (edit), app/(app)/incidents/[id] | feat(vector): read, update, delete and re-embed vectors |
+| 25 | M2 | lib/reports.js, app/api/reports, app/(app)/reports, components/Shell.js, middleware.js | feat(ui): management reports with CSV export |
+| 26 | both | database/09_queries.sql (q22-q23), database/10_viva_live_demo.sql, tests/**, docker-compose.yml, docs/** | test/docs: RLS and vector tests, viva script, docs |
 
 For steps where one file is shared (01, 04 and 05), the first person commits their part of the file and the second person adds the rest in their commit.
 

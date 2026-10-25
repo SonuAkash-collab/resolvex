@@ -5,7 +5,7 @@
 2. `npm run build && npm start`, or `npm run dev`. Open http://localhost:3000.
 3. Keep open in tabs: this guide, `docs/diagrams/er_diagram.png`, a `psql` session on the database, and the GitHub repository's contributors page.
 
-## Demo flow (about 12 minutes; follows section 16 of the brief)
+## Demo flow (about 14 minutes; follows section 16 of the brief and the 50-mark rubric)
 
 | Min | Brief item | What to show | Who |
 |---|---|---|---|
@@ -13,12 +13,26 @@
 | 1-3 | ER diagram, design, relational schema | ER diagram: weak entities (ROOM, history, embedding), ISA (technician), M:N (skills, parts used, confirmations), recursive DUPLICATE_OF. Then the schema diagram and how each construct mapped to tables. Why two paradigms (DATABASE_DESIGN §1). | M2 |
 | 3-5 | Vector database (student role) | Log in as **Student** (Aditya), go to **Report a problem**: Engineering Labs Block B, room 301, HVAC, title "Lab is very hot", description "AC blowing warm air". The panel finds incident #168 "AC not cooling" with no shared words, then the past fixes. Click **I have this problem too**: the toast shows affected users and priority score rising (trigger chain). **Search** "room is too hot" and switch Hybrid / Meaning only / Exact words. | M1 |
 | 5-7 | Advanced SQL: functions, triggers, procedures (manager role) | Log in as **Manager**, **Priority queue**. Open #168, **Why this priority** panel (`fn_priority_breakdown`). Re-classify severity and watch the score and deadline change (trigger). **Auto-assign** (`sp_assign_technician`, row locks). **Escalate SLA breaches** (`sp_escalate_overdue`). | M1 |
+| 5-6 | Vector RUD (7 marks) | Still as the student: open your own open report (#167 "Library Wi-Fi extremely slow" from **My reports**), **Edit title and description**, then **Save and re-embed**. The Vector line shows *fresh* (UPDATE). Log in as **Admin**, **Vector store**: **View** #168 shows the stored numbers and nearest neighbours (READ). **Delete** its vector: it becomes *missing* and drops out of semantic search (DELETE). **Create missing** brings it back (CREATE). | M1 |
 | 7-9 | Transactions (technician role) | Log in as **Technician**, **Work orders**, **Complete**. Add a part with quantity 99: "Transaction rolled back, nothing was saved". Set quantity 1 and complete: stock deducted, cost recorded, incident resolved, asset back to operational, reporter notified, all in one transaction. | M2 |
 | 9-10 | Views, analytics, predictive maintenance | **Analytics** (views + materialized view), **Asset health**: risk score, MTBF from the `LAG()` window function, predicted next failure. **Plan preventive maintenance** (procedure). | M2 |
-| 10-11 | Important queries, integration | **DB showcase**: run q02 (GROUP BY / HAVING), q06 (RANK window), q09 (recursive CTE), q15 (EXPLAIN shows the index), q19-q21 (catalog of triggers, procedures, indexes). Admin **Audit log**: who changed what (trigger). | M2 |
-| 11-12 | Security, test cases, contribution | `npm run test:db` (37 pass) and `npm run test:api` (23 pass) in the terminal. In psql as the app role: `DELETE FROM audit_log;` gives "permission denied". `.env.example` shows no hard-coded secrets. GitHub contributors graph. | both |
+| 10-11 | Reports, important queries, integration | **Reports**: average resolution time per category, cost per building, technician performance (like "average salary per department"); change the period, **Download CSV**, **Show the SQL**. **DB showcase**: q02 (GROUP BY / HAVING), q06 (RANK window), q09 (recursive CTE), q15 (EXPLAIN shows the index), q19-q21 (catalog). Admin **Audit log**: who changed what (trigger). | M2 |
+| 11-13 | RBAC in the database (4 marks) | **DB showcase** q22 lists the 65 Row-Level Security policies. In psql run section 10 of `database/10_viva_live_demo.sql`: as the app role with no user you see 0 incidents; as student 11 you cannot update others' incidents (UPDATE 0) or create a building (RLS error); the audit log is empty for non-admins; deactivated user 21 sees nothing. | M2 |
+| 13-14 | Security, test cases, contribution | `npm run test:db` (53 pass) and `npm run test:api` (28 pass) in the terminal. `.env.example` shows no hard-coded secrets. GitHub contributors graph. | both |
 
 ## Likely viva questions
+
+**The lab mail says RDBMS + NoSQL. Is pgvector really a second database?**
+The brief allows "SQL + Vector Database" (Option 2) and names "PostgreSQL with pgvector" as an example. The rubric says "NoSQL/Vector". pgvector adds a different data model with its own type (`vector(384)`), its own index structure (HNSW graph, not a B-tree) and its own query style (nearest-neighbour by cosine distance, not equality). Keeping it in the same engine is a design choice: similarity results join with relational data in one query, and the incident and its vector are saved in one ACID transaction. If the examiner insists on a separate product, say that the vector table could move to Qdrant or Pinecone, but you would lose those joins and that atomicity.
+
+**What is Row-Level Security and why do you need it if the website already checks roles?**
+RLS policies are rules attached to a table that PostgreSQL applies to every query. That is defence in depth: even if the website had a bug, or someone used the app's database password in psql, a student still could not change another person's incident and a technician could not touch another technician's job. The role is looked up inside the database from `users` (`fn_current_app_role`), not taken from the browser.
+
+**How does the database know who is logged in when the app uses one database user?**
+Each request runs inside a transaction that first executes `SELECT set_config('app.current_user_id', '<id>', true)`. The `true` makes it local to that transaction, so it cannot leak to another request. The policies call `fn_current_app_user()` and `fn_current_app_role()`.
+
+**Show update and delete on your vector data.**
+Update: edit your own open report and save. The text and its embedding are updated in one transaction, and the Vector line shows *fresh*. A text change made in plain SQL shows as *stale* on the Vector store page until it is re-embedded. Delete: as admin, Vector store, **Delete**. The incident stays but is no longer found by meaning. Only an admin may delete vectors, which an RLS policy enforces.
 
 **Why PostgreSQL + pgvector rather than MongoDB?**
 Our unstructured data is free text whose meaning must be compared, which is a vector-similarity problem, not a flexible-document problem. pgvector keeps the vectors next to the relational data, so one SQL query returns similarity, location, status and the past fix. With a separate store we would need two systems and application-side joins.

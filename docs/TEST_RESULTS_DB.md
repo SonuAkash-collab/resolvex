@@ -1,8 +1,8 @@
 # Database test results
 
-Run on 2026-10-13 13:35 UTC with `npm run test:db`. Every test runs in its own transaction and is rolled back.
+Run on 2026-10-25 12:23 UTC with `npm run test:db`. Every test runs in its own transaction and is rolled back.
 
-**37 of 37 passed.**
+**53 of 53 passed.**
 
 | ID | Area | Test case | Expected | Result | Detail |
 |----|------|-----------|----------|--------|--------|
@@ -43,3 +43,19 @@ Run on 2026-10-13 13:35 UTC with `npm run test:db`. Every test runs in its own t
 | T33 | Security (GRANT/REVOKE) | Application role cannot edit the state machine | Rejected by database | PASS | rejected: permission denied for table incident_status_transitions |
 | T34 | Security (SECURITY DEFINER) | Application role can refresh stats only through the definer function | Succeeds with correct effect | PASS | refreshed |
 | T35 | Security | Read-only transaction blocks writes (used by the showcase page) | Rejected by database | PASS | rejected: cannot execute UPDATE in a read-only transaction |
+| T36 | RLS | Without a logged-in user the app role sees no rows | Succeeds with correct effect | PASS | 0 incidents visible |
+| T37 | RLS | A student sees only their own notifications | Succeeds with correct effect | PASS | student sees 0, other people's: 0; admin sees 11 |
+| T38 | RLS | A student cannot file a report in someone else's name | Rejected by database | PASS | rejected: new row violates row-level security policy for table "incidents" |
+| T39 | RLS | A student cannot change another person's incident | Succeeds with correct effect | PASS | 0 rows changed |
+| T40 | RLS | A technician cannot update another technician's work order | Succeeds with correct effect | PASS | 0 rows changed |
+| T41 | RLS | Only an admin can create buildings | Rejected by database | PASS | rejected: new row violates row-level security policy for table "buildings" |
+| T42 | RLS | Only an admin can read the audit log | Succeeds with correct effect | PASS | manager sees 0, admin sees 1 |
+| T43 | RLS | A deactivated user loses all database access at once | Succeeds with correct effect | PASS | 0 incidents visible |
+| T44 | Column privilege | The app role cannot read password hashes | Rejected by database | PASS | rejected: permission denied for table users |
+| T45 | RLS (vector) | Only an admin can delete vectors | Succeeds with correct effect | PASS | 0 vectors deleted by a student |
+| T46 | RLS (vector) | Only the reporter (or a manager) may re-embed an incident's vector | Succeeds with correct effect | PASS | reporter updated 1, another student 0 |
+| T47 | RLS + procedures | Assignment and completion still work under RLS for the right roles | Succeeds with correct effect | PASS | manager assigned, technician completed, incident RESOLVED |
+| T48 | Vector READ | Every vector has 384 dimensions and unit length | Succeeds with correct effect | PASS | 171 vectors, 0 malformed |
+| T49 | Vector UPDATE | Changed text is detected as STALE and becomes FRESH after re-embedding | Succeeds with correct effect | PASS | STALE -> FRESH |
+| T50 | Vector DELETE | A deleted vector drops out of similarity search; the incident stays | Succeeds with correct effect | PASS | found before 1, after 0; status MISSING; incident kept |
+| T51 | Vector DELETE (cascade) | Deleting an incident deletes its vector (ON DELETE CASCADE) | Succeeds with correct effect | PASS | 0 orphan vectors |

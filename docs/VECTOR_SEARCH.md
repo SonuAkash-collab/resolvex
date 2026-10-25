@@ -92,8 +92,20 @@ Three SQL functions do all retrieval inside PostgreSQL. Each one joins the vecto
 
 The search page shows each result's semantic rank, keyword rank and fused score, so the examiner can switch modes and see the difference live.
 
+## 6. Read, update and delete on the vector data
+
+| Operation | In the app | In SQL | Who may do it (RLS) |
+|---|---|---|---|
+| **Create** | every new report stores its vector in the same transaction; Vector store "Create missing"; `npm run db:embed` | `INSERT INTO incident_embeddings ...` | the reporter, or a manager / admin |
+| **Read** | duplicate panel, "How it was fixed before", search page, Vector store "View" (stored values, model, dimensions, norm, nearest neighbours) | `fn_similar_incidents`, `fn_detect_duplicates`, `fn_hybrid_search`, `v_embedding_status` | any logged-in user |
+| **Update** | editing an incident's title or description re-embeds it **in the same transaction**; Vector store "Re-embed" / "Re-embed stale" | `UPDATE incident_embeddings SET embedding = ...` | the reporter, or a manager / admin |
+| **Delete** | Vector store "Delete": the incident stays but drops out of semantic search until re-embedded | `DELETE FROM incident_embeddings WHERE ...`, plus `ON DELETE CASCADE` from incidents | admin only |
+
+**Staleness detection.** `v_embedding_status` compares the stored `source_text` with the incident's current text. If someone changes the text without re-embedding (for example by plain SQL), the vector shows as **STALE**, and the Vector store page offers to recompute it.
+
 ## Evidence
 
 - `T28`: the five nearest neighbours of an AC incident are all HVAC incidents (similarity 0.95 down to 0.71).
 - `A19`: the API finds a new "Water leaking from AC" report as a duplicate of "AC dripping water" (similarity 0.91, SAME_ASSET).
-- Screenshots `03_report_duplicate_detection.png` and `04_semantic_search.png`. The search "room is too hot" ranks "AC blowing warm air" and "AC not cooling" incidents even though they share no keywords.
+- `T48`-`T51`, `A24`-`A27`: vector read / update / stale detection / delete / cascade, and who may do each.
+- Screenshots `03_report_duplicate_detection.png`, `04_semantic_search.png`, `22_vector_store_read.png`, `23_vector_deleted_missing.png`, `24_edit_report_reembed.png`. The search "room is too hot" ranks "AC blowing warm air" and "AC not cooling" incidents even though they share no keywords.

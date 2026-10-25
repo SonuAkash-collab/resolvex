@@ -153,6 +153,42 @@ async function main() {
     const r = await call("/api/parts/1", { method: "DELETE", cookie: admin.cookie });
     return { pass: r.status === 400 && /still refer/.test(r.json?.error), detail: `HTTP ${r.status}: ${r.json?.error}` };
   });
+  await test("A24", "Vector DELETE + CREATE", "Admin deletes a vector: it leaves semantic search; create-missing restores it", async () => {
+    const find = async () =>
+      (await call(`/api/search?mode=semantic&q=${encodeURIComponent("AC not cooling in Computer Lab 1")}`, { cookie: student.cookie })).json.results.some((r) => r.incident_id === 168);
+    const before = await find();
+    const del = await call("/api/vectors/168", { method: "DELETE", cookie: admin.cookie });
+    const gone = !(await find());
+    const add = await call("/api/vectors", { method: "POST", cookie: admin.cookie, body: { action: "create-missing" } });
+    const back = await find();
+    return { pass: before && del.status === 200 && gone && add.status === 200 && back, detail: `found ${before}, deleted ${del.status}, gone ${gone}, recreated ${add.status}, found again ${back}` };
+  });
+  await test("A25", "Vector RBAC", "Facility manager cannot delete vectors; student cannot read the vector store", async () => {
+    const d = await call("/api/vectors/168", { method: "DELETE", cookie: manager.cookie });
+    const r = await call("/api/vectors", { cookie: student.cookie });
+    return { pass: d.status === 403 && r.status === 403, detail: `manager delete HTTP ${d.status}, student read HTTP ${r.status}` };
+  });
+  await test("A26", "Vector UPDATE", "Reporter edits their open report; text and vector are updated together", async () => {
+    const text = "Internet in the library reading hall is extremely slow and drops every few minutes.";
+    const r = await call("/api/incidents/167", { method: "PATCH", cookie: student.cookie, body: { action: "edit", title: "Library Wi-Fi extremely slow", description: text } });
+    const v = await call("/api/vectors?id=167", { cookie: manager.cookie });
+    return { pass: r.status === 200 && v.json.vector.vector_status === "FRESH" && v.json.vector.source_text.includes(text), detail: `HTTP ${r.status}, vector ${v.json?.vector?.vector_status}` };
+  });
+  await test("A27", "Vector UPDATE RBAC", "Another student cannot edit someone else's report", async () => {
+    const other = await login("meghana.reddy@resolvex.edu");
+    const r = await call("/api/incidents/167", { method: "PATCH", cookie: other.cookie, body: { action: "edit", title: "Changed by someone else", description: "This should never be saved" } });
+    return { pass: r.status === 403, detail: `HTTP ${r.status}` };
+  });
+  await test("A28", "Reports", "All 8 management reports run for every period", async () => {
+    const list = (await call("/api/reports", { cookie: manager.cookie })).json.reports;
+    let rows = 0;
+    for (const rep of list) for (const d of ["", "&days=30"]) {
+      const r = await call(`/api/reports?id=${rep.id}${d}`, { cookie: manager.cookie });
+      if (r.status !== 200) return { pass: false, detail: `${rep.id}${d}: HTTP ${r.status} ${r.json?.error}` };
+      rows += r.json.rows.length;
+    }
+    return { pass: list.length === 8 && rows > 0, detail: `${list.length} reports, ${rows} rows in total` };
+  });
   await test("A22", "Brute-force protection", "Sixth wrong password in a row is throttled", async () => {
     let last;
     for (let i = 0; i < 6; i++) last = await login("sunil.patil@resolvex.edu", "nope" + i);
