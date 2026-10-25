@@ -19,13 +19,10 @@ export const POST = route(async (req) => {
     return fail("Too many failed attempts. Try again in 10 minutes.", 429);
   }
 
-  // parameterised query - no SQL injection possible
-  const user = await queryOne(
-    `SELECT u.user_id, u.full_name, u.email, u.password_hash, u.is_active, r.role_name
-       FROM users u JOIN roles r ON r.role_id = u.role_id
-      WHERE lower(u.email) = $1`,
-    [key]
-  );
+  // The app's DB role cannot read password hashes directly (column privilege);
+  // this SECURITY DEFINER function returns the one hash needed to check the login.
+  // Parameterised - no SQL injection possible.
+  const user = await queryOne("SELECT * FROM fn_login_lookup($1)", [key]);
 
   const valid = user ? await bcrypt.compare(password, user.password_hash) : false;
   if (!valid) {

@@ -44,6 +44,8 @@ DROP FUNCTION IF EXISTS fn_hybrid_search           CASCADE;
 DROP FUNCTION IF EXISTS fn_detect_duplicates       CASCADE;
 DROP FUNCTION IF EXISTS fn_current_app_user        CASCADE;
 DROP FUNCTION IF EXISTS fn_refresh_monthly_stats   CASCADE;
+DROP FUNCTION IF EXISTS fn_current_app_role        CASCADE;
+DROP FUNCTION IF EXISTS fn_login_lookup            CASCADE;
 DROP PROCEDURE IF EXISTS sp_assign_technician      CASCADE;
 DROP PROCEDURE IF EXISTS sp_complete_work_order    CASCADE;
 DROP PROCEDURE IF EXISTS sp_mark_duplicate         CASCADE;
