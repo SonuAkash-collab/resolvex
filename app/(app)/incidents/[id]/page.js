@@ -2,6 +2,7 @@
 import { use, useState } from "react";
 import Link from "next/link";
 import { api, useApi, useToast, PageHead, PriorityTag, Status, Loading, ErrorNote, fmt, SEVERITY } from "@/components/ui";
+import NotesPanel from "@/components/NotesPanel";
 
 const ACTIVE = ["OPEN", "ASSIGNED", "IN_PROGRESS", "ON_HOLD"];
 
@@ -321,6 +322,8 @@ export default function IncidentPage({ params }) {
               </div>
             ))}
           </section>
+
+          <NotesPanel incidentId={i.incident_id} onNotify={notify} />
         </div>
 
         <aside className="stack">

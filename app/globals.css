@@ -329,3 +329,17 @@ pre.sql { margin: 0; padding: 14px 16px; background: #1e2b2c; color: #dfe7e4; bo
   .login-art h1 { font-size: 38px; }
   .hbar { grid-template-columns: 110px 1fr 50px; }
 }
+
+/* ---------------------------------------------------------------- notes (MongoDB) */
+.note { padding: 12px 18px; border-top: 1px solid var(--line-2); }
+.note.inspection { background: var(--surface-2); }
+.note-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.note-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
+.readings { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; margin-top: 10px; }
+.reading { display: flex; flex-direction: column; padding: 6px 9px; background: #fff; border: 1px solid var(--line-2); border-radius: var(--radius-s); font-size: 12.5px; color: var(--ink-3); }
+.reading strong { font-size: 15px; color: var(--ink); font-weight: 600; }
+.reading.abn { border-color: #efc1bc; background: #fbe9e7; }
+.reading.abn strong { color: #8f1f17; }
+pre.json { margin: 0; padding: 12px 14px; background: #1e2b2c; color: #dfe7e4; border-radius: var(--radius-s); font-size: 12px; line-height: 1.5; overflow: auto; max-height: 420px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; white-space: pre; }
+textarea.code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; min-height: 90px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0 14px; }
