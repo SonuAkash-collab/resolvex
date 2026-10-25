@@ -125,6 +125,101 @@ CREATE TABLE technician_skills (
     CONSTRAINT chk_skill_level CHECK (skill_level BETWEEN 1 AND 5)
 );
 
+-- ---------------------------------------------------------------------
+-- 9. SLA POLICIES  (priority level -> response / resolution targets)
+-- ---------------------------------------------------------------------
+CREATE TABLE sla_policies (
+    priority_level    CHAR(2)       PRIMARY KEY,
+    label             VARCHAR(20)   NOT NULL UNIQUE,
+    min_score         NUMERIC(5,2)  NOT NULL UNIQUE,
+    response_hours    SMALLINT      NOT NULL,
+    resolution_hours  SMALLINT      NOT NULL,
+    CONSTRAINT chk_priority_code CHECK (priority_level IN ('P1','P2','P3','P4')),
+    CONSTRAINT chk_min_score     CHECK (min_score BETWEEN 0 AND 100),
+    CONSTRAINT chk_sla_order     CHECK (response_hours > 0 AND resolution_hours >= response_hours)
+);
+
+-- ---------------------------------------------------------------------
+-- 10. INCIDENT STATUS TRANSITIONS  (data-driven state machine)
+-- ---------------------------------------------------------------------
+CREATE TABLE incident_status_transitions (
+    from_status  VARCHAR(15) NOT NULL,
+    to_status    VARCHAR(15) NOT NULL,
+    PRIMARY KEY (from_status, to_status),
+    CONSTRAINT chk_not_self CHECK (from_status <> to_status)
+);
+
+-- ---------------------------------------------------------------------
+-- 11. INCIDENTS
+-- ---------------------------------------------------------------------
+CREATE TABLE incidents (
+    incident_id      SERIAL        PRIMARY KEY,
+    title            VARCHAR(150)  NOT NULL,
+    description      TEXT          NOT NULL,
+    incident_type    VARCHAR(12)   NOT NULL DEFAULT 'REACTIVE',
+    reported_by      INT           NOT NULL REFERENCES users(user_id),
+    room_id          INT           NOT NULL REFERENCES rooms(room_id),
+    asset_id         INT           REFERENCES assets(asset_id) ON DELETE SET NULL,
+    category_id      INT           NOT NULL REFERENCES asset_categories(category_id),
+    severity         SMALLINT      NOT NULL,
+    affected_users   INT           NOT NULL DEFAULT 1,
+    escalation_level SMALLINT      NOT NULL DEFAULT 0,
+    status           VARCHAR(15)   NOT NULL DEFAULT 'OPEN',
+    priority_score   NUMERIC(5,2)  NOT NULL DEFAULT 0,     -- computed by trigger
+    priority_level   CHAR(2)       REFERENCES sla_policies(priority_level),
+    sla_due_at       TIMESTAMPTZ,                           -- computed by trigger
+    reported_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    resolved_at      TIMESTAMPTZ,
+    updated_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    CONSTRAINT chk_title_len     CHECK (char_length(trim(title)) BETWEEN 5 AND 150),
+    CONSTRAINT chk_desc_len      CHECK (char_length(trim(description)) >= 10),
+    CONSTRAINT chk_inc_type      CHECK (incident_type IN ('REACTIVE','PREVENTIVE')),
+    CONSTRAINT chk_severity      CHECK (severity BETWEEN 1 AND 5),
+    CONSTRAINT chk_affected      CHECK (affected_users BETWEEN 1 AND 5000),
+    CONSTRAINT chk_escalation    CHECK (escalation_level BETWEEN 0 AND 3),
+    CONSTRAINT chk_inc_status    CHECK (status IN ('OPEN','ASSIGNED','IN_PROGRESS','ON_HOLD','RESOLVED','CLOSED','DUPLICATE','CANCELLED')),
+    CONSTRAINT chk_score_range   CHECK (priority_score BETWEEN 0 AND 100),
+    CONSTRAINT chk_resolved_time CHECK (resolved_at IS NULL OR resolved_at >= reported_at),
+    CONSTRAINT chk_resolved_state CHECK (
+        (status IN ('RESOLVED','CLOSED') AND resolved_at IS NOT NULL) OR
+        (status NOT IN ('RESOLVED','CLOSED') AND resolved_at IS NULL))
+);
+
+-- ---------------------------------------------------------------------
+-- 12. INCIDENT EMBEDDINGS  (VECTOR DATABASE part : pgvector)
+--     384-dimensional sentence embeddings (all-MiniLM-L6-v2)
+-- ---------------------------------------------------------------------
+CREATE TABLE incident_embeddings (
+    incident_id   INT           PRIMARY KEY REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    embedding     vector(384)   NOT NULL,
+    model_name    VARCHAR(60)   NOT NULL DEFAULT 'Xenova/all-MiniLM-L6-v2',
+    source_text   TEXT          NOT NULL,          -- exact text that was embedded (metadata)
+    embedded_at   TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------
+-- 13. INCIDENT REPORTERS  ("Me too" confirmations -> M:N users/incidents)
+-- ---------------------------------------------------------------------
+CREATE TABLE incident_reporters (
+    incident_id  INT          NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    user_id      INT          NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    joined_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (incident_id, user_id)
+);
+
+-- ---------------------------------------------------------------------
+-- 14. INCIDENT STATUS HISTORY  (filled automatically by trigger)
+-- ---------------------------------------------------------------------
+CREATE TABLE incident_status_history (
+    history_id   BIGSERIAL    PRIMARY KEY,
+    incident_id  INT          NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
+    old_status   VARCHAR(15),
+    new_status   VARCHAR(15)  NOT NULL,
+    changed_by   INT          REFERENCES users(user_id) ON DELETE SET NULL,
+    changed_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------
 -- 15. WORK ORDERS
 -- ---------------------------------------------------------------------
 CREATE TABLE work_orders (
