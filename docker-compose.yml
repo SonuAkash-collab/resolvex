@@ -1,0 +1,21 @@
+# PostgreSQL 16 with the pgvector extension, for local development.
+#   docker compose up -d
+# Then use DATABASE_ADMIN_URL=postgresql://postgres:<POSTGRES_PASSWORD>@localhost:5432/resolvex
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: resolvex-db
+    environment:
+      POSTGRES_DB: resolvex
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - resolvex_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d resolvex"]
+      interval: 5s
+      retries: 10
+volumes:
+  resolvex_pgdata:

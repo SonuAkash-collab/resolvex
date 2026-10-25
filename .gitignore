@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env.*.local
+.model-cache/
+models/
+*.log
+.DS_Store
+__pycache__/
+docs/diagrams/*.dot
