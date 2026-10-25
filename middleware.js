@@ -15,6 +15,8 @@ const PAGE_ACCESS = [
   ["/assets", ["FACILITY_MANAGER", "ADMIN"]],
   ["/inventory", ["TECHNICIAN", "FACILITY_MANAGER", "ADMIN"]],
   ["/showcase", ["FACILITY_MANAGER", "ADMIN"]],
+  ["/vectors", ["FACILITY_MANAGER", "ADMIN"]],
+  ["/reports", ["FACILITY_MANAGER", "ADMIN"]],
   ["/admin", ["ADMIN"]],
 ];
 
