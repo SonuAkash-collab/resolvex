@@ -220,3 +220,26 @@ SELECT date_trunc('month', i.reported_at)::DATE                              AS 
 WITH DATA;
 
 CREATE UNIQUE INDEX uq_mv_monthly ON mv_monthly_incident_stats(month, category_name);
+
+-- ---------------------------------------------------------------------
+-- v_embedding_status : health of the VECTOR STORE, one row per incident.
+--   MISSING : incident has no embedding (not searchable by meaning)
+--   STALE   : incident text changed after it was embedded
+--   FRESH   : embedding matches the current text
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_embedding_status AS
+SELECT i.incident_id,
+       i.title,
+       i.status,
+       c.category_name,
+       e.model_name,
+       vector_dims(e.embedding)                         AS dims,
+       ROUND(vector_norm(e.embedding)::NUMERIC, 4)      AS norm,
+       e.embedded_at,
+       e.source_text,
+       CASE WHEN e.incident_id IS NULL THEN 'MISSING'
+            WHEN e.source_text <> concat_ws('. ', i.title, i.description, c.category_name) THEN 'STALE'
+            ELSE 'FRESH' END                            AS vector_status
+  FROM incidents i
+  JOIN asset_categories c ON c.category_id = i.category_id
+  LEFT JOIN incident_embeddings e ON e.incident_id = i.incident_id;

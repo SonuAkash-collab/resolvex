@@ -15,16 +15,24 @@ export default function IncidentPage({ params }) {
   const [tech, setTech] = useState("");
   const [dupOf, setDupOf] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(null); // { title, description } while the edit form is open
 
   if (error) return <ErrorNote error={error} />;
   if (!data || !me) return <Loading />;
 
-  const { incident: i, history, workOrders, parts, coReporters, similar, breakdown, isCoReporter } = data;
+  const { incident: i, history, workOrders, parts, coReporters, similar, breakdown, isCoReporter, vector } = data;
   const user = me.user;
   const isManager = ["FACILITY_MANAGER", "ADMIN"].includes(user.role);
   const isReporter = i.reporter_id === user.id;
   const active = ACTIVE.includes(i.status);
   const skilled = (meta?.technicians || []).filter((t) => t.skill_ids.includes(i.category_id));
+  const canEdit = (isReporter && i.status === "OPEN") || (isManager && active);
+
+  async function saveEdit(e) {
+    e.preventDefault();
+    await act(`/api/incidents/${i.incident_id}`, { action: "edit", ...editing }, "PATCH");
+    setEditing(null);
+  }
 
   async function act(url, body, method = "POST") {
     setBusy(true);
@@ -55,7 +63,36 @@ export default function IncidentPage({ params }) {
       <div className="grid split">
         <div className="stack">
           <section className="panel panel-body">
-            <p style={{ fontSize: 16, maxWidth: "70ch", whiteSpace: "pre-wrap" }}>{i.description}</p>
+            {editing ? (
+              <form onSubmit={saveEdit}>
+                <div className="field">
+                  <label htmlFor="et">Title</label>
+                  <input id="et" type="text" required minLength={5} maxLength={150} value={editing.title} onChange={(e) => setEditing({ ...editing, title: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label htmlFor="ed">Description</label>
+                  <textarea id="ed" required minLength={10} value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
+                  <span className="hint">Saving updates the text and recomputes its vector embedding in the same transaction.</span>
+                </div>
+                <div className="actions">
+                  <button className="btn signal" disabled={busy}>
+                    {busy ? "Saving…" : "Save and re-embed"}
+                  </button>
+                  <button type="button" className="btn ghost" onClick={() => setEditing(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <p style={{ fontSize: 16, maxWidth: "70ch", whiteSpace: "pre-wrap" }}>{i.description}</p>
+                {canEdit && (
+                  <button className="btn small ghost" style={{ marginTop: 10 }} onClick={() => setEditing({ title: i.title, description: i.description })}>
+                    Edit title and description
+                  </button>
+                )}
+              </>
+            )}
             <dl className="facts" style={{ marginTop: 18 }}>
               <dt>Location</dt>
               <dd>
@@ -93,6 +130,19 @@ export default function IncidentPage({ params }) {
                   </dd>
                 </>
               )}
+              <dt>Vector</dt>
+              <dd>
+                {vector?.vector_status === "MISSING" ? (
+                  <span className="chip bad">no embedding: not searchable by meaning</span>
+                ) : (
+                  <>
+                    <span className={"chip " + (vector?.vector_status === "STALE" ? "warn" : "good")}>{vector?.vector_status === "STALE" ? "stale" : "fresh"}</span>{" "}
+                    <span className="small muted">
+                      {vector?.dims}-d {vector?.model_name}, embedded {fmt.ago(vector?.embedded_at)}
+                    </span>
+                  </>
+                )}
+              </dd>
               {i.feedback_rating && (
                 <>
                   <dt>Reporter rating</dt>

@@ -13,6 +13,7 @@ DROP VIEW IF EXISTS v_asset_health            CASCADE;
 DROP VIEW IF EXISTS v_maintenance_cost_summary CASCADE;
 DROP VIEW IF EXISTS v_sla_compliance          CASCADE;
 DROP VIEW IF EXISTS v_low_stock_parts         CASCADE;
+DROP VIEW IF EXISTS v_embedding_status        CASCADE;
 
 DROP TABLE IF EXISTS audit_log                 CASCADE;
 DROP TABLE IF EXISTS alerts                    CASCADE;
