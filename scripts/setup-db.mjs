@@ -3,8 +3,10 @@
 //   1. creates the database if it does not exist
 //   2. runs database/00_drop.sql ... 08_seed.sql in order
 //   3. creates the least-privilege application login (APP_DB_USER)
-//   4. generates embeddings for every incident (pgvector)
-// Usage:  npm run db:setup          (add --skip-embed to skip step 4)
+//   4. sets up MongoDB (document store): app login, collections with
+//      validators, indexes and data (scripts/setup-mongo.mjs)
+//   5. generates embeddings for every incident (pgvector)
+// Usage:  npm run db:setup          (add --skip-embed to skip step 5)
 // =====================================================================
 import fs from "node:fs";
 import path from "node:path";
@@ -83,11 +85,23 @@ async function main() {
   }
   await client.end();
 
+  let mongoOk = true;
+  try {
+    const { setupMongo } = await import("./setup-mongo.mjs");
+    console.log("");
+    await setupMongo({ pgUrl: adminUrl });
+  } catch (e) {
+    mongoOk = false;
+    console.error(`\nMongoDB setup failed: ${e.message}`);
+    console.error("Is MongoDB running (docker compose up -d) and are MONGODB_ADMIN_URI / MONGODB_URI in .env.local correct?");
+    console.error("PostgreSQL is ready; re-run only the MongoDB part later with:  npm run db:mongo\n");
+  }
+
   if (!process.argv.includes("--skip-embed")) {
     const { embedAll } = await import("./embed-incidents.mjs");
     await embedAll(adminUrl);
   }
-  console.log("\nDatabase is ready. Start the app with:  npm run dev");
+  console.log(mongoOk ? "\nDatabases are ready. Start the app with:  npm run dev" : "\nPostgreSQL is ready, MongoDB is NOT (see the message above).");
 }
 
 main().catch((e) => {
