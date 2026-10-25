@@ -184,3 +184,168 @@ CREATE TRIGGER trg_incident_reporter_count
 AFTER INSERT OR DELETE ON incident_reporters
 FOR EACH ROW EXECUTE FUNCTION trgfn_incident_reporter_count();
 
+-- ---------------------------------------------------------------------
+-- 6. A technician row may only belong to a user whose role is TECHNICIAN
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION trgfn_technician_role()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM users u JOIN roles r ON r.role_id = u.role_id
+                    WHERE u.user_id = NEW.technician_id AND r.role_name = 'TECHNICIAN') THEN
+        RAISE EXCEPTION 'User % does not have the TECHNICIAN role', NEW.technician_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_technician_role
+BEFORE INSERT OR UPDATE ON technicians
+FOR EACH ROW EXECUTE FUNCTION trgfn_technician_role();
+
+-- ---------------------------------------------------------------------
+-- 7. Work order validation: technician must be available, have the skill
+--    for the incident category and be below the concurrent job limit
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION trgfn_work_order_validate()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_tech    technicians%ROWTYPE;
+    v_cat     INT;
+    v_active  INT;
+BEGIN
+    SELECT * INTO v_tech FROM technicians WHERE technician_id = NEW.technician_id;
+    SELECT category_id INTO v_cat FROM incidents WHERE incident_id = NEW.incident_id;
+
+    IF NOT v_tech.is_available THEN
+        RAISE EXCEPTION 'Technician % is currently unavailable', v_tech.employee_code USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM technician_skills
+                    WHERE technician_id = NEW.technician_id AND category_id = v_cat) THEN
+        RAISE EXCEPTION 'Technician % is not skilled for this incident category', v_tech.employee_code
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    SELECT COUNT(*) INTO v_active FROM work_orders
+     WHERE technician_id = NEW.technician_id AND status IN ('ASSIGNED','IN_PROGRESS');
+    IF v_active >= v_tech.max_concurrent_jobs THEN
+        RAISE EXCEPTION 'Technician % already has % active jobs (limit %)', v_tech.employee_code, v_active, v_tech.max_concurrent_jobs
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_work_order_validate
+BEFORE INSERT ON work_orders
+FOR EACH ROW EXECUTE FUNCTION trgfn_work_order_validate();
+
+CREATE OR REPLACE FUNCTION trgfn_work_order_assigned_alert()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO alerts (alert_type, alert_level, message, target_user_id, incident_id)
+    SELECT 'ASSIGNMENT', CASE WHEN i.priority_level IN ('P1','P2') THEN 'WARNING' ELSE 'INFO' END,
+           format('New work order #%s for incident #%s "%s" (%s)', NEW.work_order_id, i.incident_id, i.title, i.priority_level),
+           NEW.technician_id, i.incident_id
+      FROM incidents i WHERE i.incident_id = NEW.incident_id;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER trg_work_order_assigned_alert
+AFTER INSERT ON work_orders
+FOR EACH ROW EXECUTE FUNCTION trgfn_work_order_assigned_alert();
+
+-- ---------------------------------------------------------------------
+-- 8. Keep incident + asset state in sync with the work order state
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION trgfn_work_order_sync()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    v_asset INT;
+BEGIN
+    IF NEW.status IS NOT DISTINCT FROM OLD.status THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT asset_id INTO v_asset FROM incidents WHERE incident_id = NEW.incident_id;
+
+    IF NEW.status = 'IN_PROGRESS' THEN
+        UPDATE incidents SET status = 'IN_PROGRESS'
+         WHERE incident_id = NEW.incident_id AND status <> 'IN_PROGRESS';
+        UPDATE assets SET status = 'UNDER_REPAIR' WHERE asset_id = v_asset AND status = 'OPERATIONAL';
+
+    ELSIF NEW.status = 'COMPLETED' THEN
+        UPDATE incidents SET status = 'RESOLVED' WHERE incident_id = NEW.incident_id;
+        UPDATE assets SET status = 'OPERATIONAL', last_maintenance_date = CURRENT_DATE
+         WHERE asset_id = v_asset AND status <> 'DECOMMISSIONED';
+
+    ELSIF NEW.status = 'CANCELLED' THEN
+        UPDATE incidents SET status = 'OPEN'
+         WHERE incident_id = NEW.incident_id AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD');
+        UPDATE assets SET status = 'OPERATIONAL' WHERE asset_id = v_asset AND status = 'UNDER_REPAIR';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER trg_work_order_sync
+AFTER UPDATE OF status ON work_orders
+FOR EACH ROW EXECUTE FUNCTION trgfn_work_order_sync();
+
+-- ---------------------------------------------------------------------
+-- 9. Low stock alert when stock crosses the reorder level
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION trgfn_low_stock_alert()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.quantity_in_stock <= NEW.reorder_level AND OLD.quantity_in_stock > OLD.reorder_level THEN
+        INSERT INTO alerts (alert_type, alert_level, message, target_role, part_id)
+        VALUES ('LOW_STOCK',
+                CASE WHEN NEW.quantity_in_stock = 0 THEN 'CRITICAL' ELSE 'WARNING' END,
+                format('Low stock: %s (%s) has %s left, reorder level is %s',
+                       NEW.part_name, NEW.part_code, NEW.quantity_in_stock, NEW.reorder_level),
+                'ADMIN', NEW.part_id);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER trg_low_stock_alert
+AFTER UPDATE OF quantity_in_stock ON spare_parts
+FOR EACH ROW EXECUTE FUNCTION trgfn_low_stock_alert();
+
+-- ---------------------------------------------------------------------
+-- 10. Generic AUDIT trigger (JSONB before/after snapshot).
+--     Password hashes are stripped from the snapshot.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION trgfn_audit()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    -- password_hash is secret; risk_score is derived data recomputed in bulk
+    v_old JSONB := CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN to_jsonb(OLD) - 'password_hash' - 'risk_score' END;
+    v_new JSONB := CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN to_jsonb(NEW) - 'password_hash' - 'risk_score' END;
+    v_pk  TEXT  := TG_ARGV[0];
+BEGIN
+    IF TG_OP = 'UPDATE' AND v_old = v_new THEN
+        RETURN NULL;                      -- nothing really changed
+    END IF;
+    INSERT INTO audit_log (table_name, operation, row_pk, old_data, new_data, changed_by)
+    VALUES (TG_TABLE_NAME, TG_OP, COALESCE(v_new, v_old) ->> v_pk, v_old, v_new, fn_current_app_user());
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER trg_audit_users        AFTER INSERT OR UPDATE OR DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION trgfn_audit('user_id');
+CREATE TRIGGER trg_audit_assets       AFTER INSERT OR UPDATE OR DELETE ON assets
+FOR EACH ROW EXECUTE FUNCTION trgfn_audit('asset_id');
+CREATE TRIGGER trg_audit_spare_parts  AFTER INSERT OR UPDATE OR DELETE ON spare_parts
+FOR EACH ROW EXECUTE FUNCTION trgfn_audit('part_id');
+CREATE TRIGGER trg_audit_work_orders  AFTER INSERT OR UPDATE OR DELETE ON work_orders
+FOR EACH ROW EXECUTE FUNCTION trgfn_audit('work_order_id');
+CREATE TRIGGER trg_audit_sla_policies AFTER INSERT OR UPDATE OR DELETE ON sla_policies
+FOR EACH ROW EXECUTE FUNCTION trgfn_audit('priority_level');
+CREATE TRIGGER trg_audit_technicians  AFTER INSERT OR UPDATE OR DELETE ON technicians
+FOR EACH ROW EXECUTE FUNCTION trgfn_audit('technician_id');
