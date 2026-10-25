@@ -179,7 +179,7 @@ async function main() {
     const r = await call("/api/incidents/167", { method: "PATCH", cookie: other.cookie, body: { action: "edit", title: "Changed by someone else", description: "This should never be saved" } });
     return { pass: r.status === 403, detail: `HTTP ${r.status}` };
   });
-  await test("A28", "Reports", "All 8 management reports run for every period", async () => {
+  await test("A28", "Reports", "All 15 reports (8 SQL, 7 MongoDB pipelines) run for every period", async () => {
     const list = (await call("/api/reports", { cookie: manager.cookie })).json.reports;
     let rows = 0;
     for (const rep of list) for (const d of ["", "&days=30"]) {
@@ -187,7 +187,87 @@ async function main() {
       if (r.status !== 200) return { pass: false, detail: `${rep.id}${d}: HTTP ${r.status} ${r.json?.error}` };
       rows += r.json.rows.length;
     }
-    return { pass: list.length === 8 && rows > 0, detail: `${list.length} reports, ${rows} rows in total` };
+    const sql = list.filter((x) => x.engine === "postgresql").length;
+    const mongo = list.filter((x) => x.engine === "mongodb").length;
+    return { pass: sql === 8 && mongo === 7 && rows > 0, detail: `${sql} SQL + ${mongo} MongoDB reports, ${rows} rows in total` };
+  });
+
+  // ------------------------------------------------------------ MongoDB (document store)
+  const notesOf = async (id, who) => (await call(`/api/incidents/${id}/notes`, { cookie: who.cookie })).json?.notes || [];
+  await test("A29", "NoSQL READ", "Students see only PUBLIC notes; staff also see internal ones", async () => {
+    const [s, m] = await Promise.all([notesOf(163, student), notesOf(163, manager)]);
+    const leaked = s.filter((n) => n.visibility !== "PUBLIC").length;
+    return { pass: m.length > s.length && leaked === 0, detail: `incident #163: manager sees ${m.length} notes, student ${s.length} (${leaked} internal leaked)` };
+  });
+  let studentNote = null;
+  await test("A30", "NoSQL CREATE", "Student posts a comment; tags are normalised and it is stored in MongoDB", async () => {
+    const r = await call("/api/incidents/168/notes", { method: "POST", cookie: student.cookie, body: { kind: "COMMENT", text: "API test comment", tags: "Exam Week, urgent" } });
+    studentNote = r.json?.note?._id;
+    const back = (await notesOf(168, student)).find((n) => n._id === studentNote);
+    return { pass: r.status === 201 && !!back && back.tags.join() === "exam-week,urgent", detail: `HTTP ${r.status}, _id ${studentNote}, tags ${JSON.stringify(back?.tags)}` };
+  });
+  await test("A31", "NoSQL RBAC", "Student cannot post internal notes or inspection logs", async () => {
+    const a = await call("/api/incidents/168/notes", { method: "POST", cookie: student.cookie, body: { kind: "COMMENT", text: "secret", visibility: "STAFF" } });
+    const b = await call("/api/incidents/168/notes", { method: "POST", cookie: student.cookie, body: { kind: "INSPECTION", text: "fake", readings: { room_temp_c: 30 }, verdict: "MONITOR" } });
+    return { pass: a.status === 403 && b.status === 403, detail: `internal note HTTP ${a.status}, inspection HTTP ${b.status}: ${b.json?.error}` };
+  });
+  await test("A32", "NoSQL RBAC", "Technician logs an inspection only on an incident he has a work order for", async () => {
+    const insp = { kind: "INSPECTION", text: "API test inspection", readings: { supply_air_temp_c: 21, filter_condition: "Dusty" }, checklist: [{ item: "Filter clean", ok: false }], verdict: "MONITOR" };
+    const own = await call("/api/incidents/161/notes", { method: "POST", cookie: tech.cookie, body: insp });
+    const other = await call("/api/incidents/166/notes", { method: "POST", cookie: tech.cookie, body: insp });
+    if (own.json?.note?._id) await call(`/api/notes/${own.json.note._id}`, { method: "DELETE", cookie: tech.cookie });
+    return { pass: own.status === 201 && other.status === 403, detail: `own job #161 HTTP ${own.status}; someone else's job #166 HTTP ${other.status}` };
+  });
+  await test("A33", "NoSQL validation", "Readings are checked against the category's template", async () => {
+    const wrong = await call("/api/incidents/168/notes", { method: "POST", cookie: manager.cookie, body: { kind: "INSPECTION", text: "x x", readings: { voltage_v: 230 }, verdict: "MONITOR" } });
+    const range = await call("/api/incidents/168/notes", { method: "POST", cookie: manager.cookie, body: { kind: "INSPECTION", text: "x x", readings: { supply_air_temp_c: 99 }, verdict: "MONITOR" } });
+    return { pass: wrong.status === 400 && range.status === 400, detail: `${wrong.json?.error} / ${range.json?.error}` };
+  });
+  await test("A34", "NoSQL UPDATE", "Only the author edits a note; the old text is kept in its history", async () => {
+    const other = await call(`/api/notes/${studentNote}`, { method: "PATCH", cookie: manager.cookie, body: { action: "edit", text: "changed by manager" } });
+    const own = await call(`/api/notes/${studentNote}`, { method: "PATCH", cookie: student.cookie, body: { action: "edit", text: "API test comment (edited)" } });
+    return { pass: other.status === 403 && own.status === 200 && own.json.note.edit_count === 1 && own.json.note.previous_text === "API test comment", detail: `manager HTTP ${other.status}; author HTTP ${own.status}, edits ${own.json?.note?.edit_count}` };
+  });
+  await test("A35", "NoSQL UPDATE", "Helpful vote toggles ($addToSet / $pull); no voting on your own note", async () => {
+    const self = await call(`/api/notes/${studentNote}`, { method: "PATCH", cookie: student.cookie, body: { action: "helpful" } });
+    const on = await call(`/api/notes/${studentNote}`, { method: "PATCH", cookie: tech.cookie, body: { action: "helpful" } });
+    const off = await call(`/api/notes/${studentNote}`, { method: "PATCH", cookie: tech.cookie, body: { action: "helpful" } });
+    return { pass: self.status === 400 && on.json?.note?.helpful_count === 1 && off.json?.note?.helpful_count === 0, detail: `self HTTP ${self.status}; votes ${on.json?.note?.helpful_count} then ${off.json?.note?.helpful_count}` };
+  });
+  await test("A36", "NoSQL DELETE", "Others cannot delete a note; the author can", async () => {
+    const other = await login("meghana.reddy@resolvex.edu");
+    const a = await call(`/api/notes/${studentNote}`, { method: "DELETE", cookie: other.cookie });
+    const b = await call(`/api/notes/${studentNote}`, { method: "DELETE", cookie: student.cookie });
+    const gone = !(await notesOf(168, student)).some((n) => n._id === studentNote);
+    return { pass: a.status === 403 && b.status === 200 && gone, detail: `other student HTTP ${a.status}; author HTTP ${b.status}; gone from thread: ${gone}` };
+  });
+  await test("A37", "NoSQL injection", "Operator objects and $where are refused", async () => {
+    const a = await call("/api/incidents/168/notes", { method: "POST", cookie: student.cookie, body: { kind: "COMMENT", text: { $gt: "" } } });
+    const b = await call(`/api/notes/${encodeURIComponent('{"$ne":null}')}`, { method: "DELETE", cookie: student.cookie });
+    const c = await call("/api/nosql", { method: "POST", cookie: manager.cookie, body: { action: "find", collection: "incident_notes", filter: '{"$where":"sleep(5000) || true"}' } });
+    return { pass: a.status === 400 && b.status === 400 && c.status === 400, detail: `text object HTTP ${a.status}; id {"$ne":null} HTTP ${b.status}; $where HTTP ${c.status}` };
+  });
+  await test("A38", "Cross-database", "A note cannot be attached to an incident that does not exist in PostgreSQL", async () => {
+    const r = await call("/api/incidents/99999/notes", { method: "POST", cookie: manager.cookie, body: { kind: "COMMENT", text: "orphan attempt" } });
+    return { pass: r.status === 404, detail: `HTTP ${r.status}: ${r.json?.error}` };
+  });
+  await test("A39", "NoSQL RBAC", "Document store page: students refused, managers see collections, validators and indexes", async () => {
+    const s = await call("/api/nosql", { cookie: student.cookie });
+    const m = await call("/api/nosql", { cookie: manager.cookie });
+    const cols = m.json?.collections || [];
+    return { pass: s.status === 403 && cols.length === 3 && cols.every((c) => c.validator && c.indexes.length > 1), detail: `student HTTP ${s.status}; ${cols.map((c) => `${c.name} ${c.count} docs / ${c.indexes.length} indexes`).join(", ")}` };
+  });
+  await test("A40", "NoSQL indexes", "Query console shows index use with explain()", async () => {
+    const r = await call("/api/nosql", { method: "POST", cookie: manager.cookie, body: { action: "find", collection: "incident_notes", filter: '{"tags":"refrigerant"}', limit: 5 } });
+    return { pass: r.status === 200 && r.json.plan.indexes.includes("ix_tags"), detail: `${r.json?.shell} -> ${r.json?.plan?.stages}, ${r.json?.matching} match` };
+  });
+  await test("A41", "NoSQL CREATE", "Each search is appended to the MongoDB search log", async () => {
+    const count = async () => (await call("/api/nosql", { cookie: manager.cookie })).json.collections.find((c) => c.name === "search_events").count;
+    const before = await count();
+    await call("/api/search?q=projector%20dim&mode=keyword", { cookie: student.cookie });
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await count();
+    return { pass: after === before + 1, detail: `search_events ${before} -> ${after}` };
   });
   await test("A22", "Brute-force protection", "Sixth wrong password in a row is throttled", async () => {
     let last;

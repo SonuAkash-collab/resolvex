@@ -1,15 +1,19 @@
 # ResolveX: database design
 
-## 1. Why two database paradigms
+## 1. Why three data models (RDBMS + vector + NoSQL)
 
-The data ResolveX handles comes in two different shapes, and each shape goes to the store that suits it.
+The data ResolveX handles comes in three different shapes, and each shape goes to the store that suits it.
 
 | Data | Shape | Store | Why |
 |---|---|---|---|
 | Users, roles, buildings, rooms, assets, work orders, spare parts, costs, SLA policies | Highly structured, strongly related, must never contradict itself (stock cannot go negative; a repair must update stock, cost and status together) | **PostgreSQL relational tables** | Foreign keys, CHECK constraints, triggers and ACID transactions guarantee integrity. Joins, aggregates and views answer the operational questions. |
 | What people write when they report a problem ("AC blowing warm air", "room is too hot") | Unstructured free text. The same fault is described in very different words | **pgvector** (`incident_embeddings`, `vector(384)`, HNSW index) | Keyword search cannot see that "room is too hot" and "AC not cooling" are the same problem. Sentence embeddings place them close together, so cosine similarity finds duplicates and past fixes. |
 
-Both live in one PostgreSQL server. The vector table is joined to the relational tables in the same SQL query: similarity, location, status and the fix that worked come back together. With a separate vector product, that would need two systems and application-side joins.
+| Incident discussion threads, technicians' field inspection logs, inspection templates, the search log | Semi-structured. Readings differ for each of the 9 equipment categories (38 fields in total); notes contain nested arrays (checklist, tags, votes, edit history); the search log is append-only and only useful for 90 days | **MongoDB** (`incident_notes`, `inspection_templates`, `search_events`) | Each document stores exactly the readings it has, with real types, without 38 nullable columns or an entity-attribute-value table. `$jsonSchema` validators still enforce the rules per category. A TTL index expires old search events automatically. Details: [NOSQL_DESIGN.md](NOSQL_DESIGN.md). |
+
+The relational and vector data live in one PostgreSQL server. The vector table is joined to the relational tables in the same SQL query: similarity, location, status and the fix that worked come back together. With a separate vector product, that would need two systems and application-side joins.
+
+MongoDB is separate on purpose: notes are written far more often than incidents, need no joins to display (the author's name is a snapshot inside the note), and must not slow down or lock the transactional tables. The trade-off is that there is no foreign key across the two databases, so the API checks every `incident_id` in PostgreSQL (under row-level security) before writing a note, and the Document store page can find and clean up orphaned notes.
 
 ## 2. ER diagram
 
@@ -268,3 +272,17 @@ Triggers that act on behalf of the system are SECURITY DEFINER, so they keep wor
 | UPDATE | edit an incident's text + re-embed its vector, status changes, close / reopen / feedback, severity re-classification, start / hold / resume work, stock deduction and restock, SLA policy edits, user activation, technician availability, escalation |
 | DELETE | withdraw a confirmation (`incident_reporters`, trigger lowers affected users), delete read notifications (`alerts`), delete a vector (`incident_embeddings`, admin), delete an unused spare part (refused by the FK if the part was used), seed rebuild of history |
 | SELECT | every page; joins, GROUP BY / HAVING, ORDER BY, aggregates, subqueries, window functions, CTEs, ROLLUP (see `database/09_queries.sql`) |
+
+## 15. MongoDB (document store)
+
+Full design: [NOSQL_DESIGN.md](NOSQL_DESIGN.md). Summary:
+
+| Item | ResolveX |
+|---|---|
+| Collections | `incident_notes` (comments and inspection logs), `inspection_templates` (one per equipment category), `search_events` (search log) |
+| Schema enforcement | `$jsonSchema` validators, `validationLevel: strict`, `validationAction: error`; one `oneOf` branch per category, generated from the templates, so an HVAC log can only hold HVAC readings of the right type and range |
+| Indexes | compound `{incident_id, created_at}`, compound on an embedded field `{author.user_id, created_at}`, multikey `{tags}`, partial `{category_key, verdict}` where `kind = INSPECTION`, text `{text, tags}`, unique `{category_id}`, TTL `{at}` (90 days) |
+| CRUD | `insertOne`; `find` / `$text` / `aggregate`; `findOneAndUpdate` with `$set` + `$push`, `$addToSet` / `$pull`; `deleteOne` / `deleteMany` |
+| Security | Login `resolvex_app` with the custom role `resolvexAppRole`: no drop, no index or validator changes, no `bypassDocumentValidation`; search log append-only; templates read-only |
+| Consistency with PostgreSQL | `incident_id` is checked in PostgreSQL (RLS) before every write; an orphan check and cleanup on the Document store page; tests N25-N27 |
+

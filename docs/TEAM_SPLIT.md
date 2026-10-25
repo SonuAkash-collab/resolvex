@@ -11,7 +11,8 @@ The brief asks that **each member works on both the database and the application
 | **API** | /api/incidents/**, /api/search, /api/alerts, /api/meta, /api/vectors/** | /api/auth/**, /api/work-orders/**, /api/parts/**, /api/assets/**, /api/users/**, /api/campus, /api/maintenance, /api/analytics, /api/reports, /api/audit, /api/showcase |
 | **Pages** | report, my reports, search, incidents list + detail (incl. edit + re-embed), priority queue, notifications, vector store | login, work orders, spare parts, asset health, analytics, reports, admin users / campus / audit, DB showcase |
 | **Lib** | lib/embeddings.js, lib/incidents.js, components/IncidentTable.js | lib/db.js, lib/auth.js, lib/api.js, middleware.js, components/Shell.js |
-| **Tests and docs** | T04-T18, T25, T27-T29; docs/VECTOR_SEARCH.md | T01-T03, T19-T24, T26, T29b-T35, API tests; docs/DATABASE_DESIGN.md |
+| **MongoDB** | `incident_notes` thread: lib/notes.js, /api/incidents/[id]/notes, /api/notes/[noteId], components/NotesPanel.js, search logging | database/mongodb/schema.mjs (validators, indexes), scripts/setup-mongo.mjs (role, login, seed), lib/mongo.js, /api/nosql + Document store page, lib/mongo-reports.js |
+| **Tests and docs** | T04-T18, T25, T27-T29, N12-N20, A29-A38; docs/VECTOR_SEARCH.md | T01-T03, T19-T24, T26, T29b-T35, N01-N11, N21-N27, other API tests; docs/DATABASE_DESIGN.md, docs/NOSQL_DESIGN.md |
 | **Together** | ER diagram and schema review, 01_schema.sql, seed generator, README, report | |
 
 ## Setting up the repository
@@ -62,6 +63,10 @@ Commit in this order. Each step lists who commits and which files. Read and run 
 | 24 | M1 | database/06_views.sql (v_embedding_status), app/api/vectors/**, app/(app)/vectors, app/api/incidents/[id] (edit), app/(app)/incidents/[id] | feat(vector): read, update, delete and re-embed vectors |
 | 25 | M2 | lib/reports.js, app/api/reports, app/(app)/reports, components/Shell.js, middleware.js | feat(ui): management reports with CSV export |
 | 26 | both | database/09_queries.sql (q22-q23), database/10_viva_live_demo.sql, tests/**, docker-compose.yml, docs/** | test/docs: RLS and vector tests, viva script, docs |
+| 27 | M2 | docker-compose.yml (mongo service), .env.example, package.json (mongodb driver, scripts), database/mongodb/schema.mjs, scripts/setup-mongo.mjs, scripts/setup-db.mjs, lib/mongo.js, lib/api.js | feat(nosql): MongoDB collections, validators, indexes, app role and seed |
+| 28 | M1 | lib/notes.js, app/api/incidents/[id]/notes, app/api/notes/**, app/api/search (search log), components/NotesPanel.js, app/(app)/incidents/[id], app/globals.css | feat(nosql): incident discussion and inspection logs (MongoDB CRUD) |
+| 29 | M2 | lib/mongo-reports.js, app/api/reports, app/(app)/reports, app/api/nosql, app/(app)/nosql, components/Shell.js, middleware.js | feat(nosql): Document store page and aggregation pipeline reports |
+| 30 | both | tests/run-nosql-tests.mjs, tests/run-api-tests.mjs (A28-A41), database/mongodb/live_demo.mongosh.js, docs/NOSQL_DESIGN.md, docs/diagrams/document_model.*, docs/diagrams/architecture.*, README.md, docs/** | test/docs: MongoDB tests, mongosh viva script, NoSQL design |
 
 For steps where one file is shared (01, 04 and 05), the first person commits their part of the file and the second person adds the rest in their commit.
 
