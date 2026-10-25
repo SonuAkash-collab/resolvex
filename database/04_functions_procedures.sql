@@ -143,6 +143,51 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- ---------------------------------------------------------------------
+-- FUNCTION: fn_asset_risk_score  (predictive maintenance indicator)
+--   failures in last 180 days           -> up to 40
+--   overdue-ness vs maintenance interval -> up to 25
+--   asset age                            -> up to 15
+--   criticality                          -> up to 20
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION fn_asset_risk_score(p_asset_id INT)
+RETURNS NUMERIC
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_asset     assets%ROWTYPE;
+    v_interval  SMALLINT;
+    v_failures  INT;
+    v_days      INT;
+    v_age_years NUMERIC;
+    v_score     NUMERIC;
+BEGIN
+    SELECT * INTO v_asset FROM assets WHERE asset_id = p_asset_id;
+    IF NOT FOUND OR v_asset.status = 'DECOMMISSIONED' THEN
+        RETURN 0;
+    END IF;
+
+    SELECT maintenance_interval_days INTO v_interval
+      FROM asset_categories WHERE category_id = v_asset.category_id;
+
+    SELECT COUNT(*) INTO v_failures
+      FROM incidents
+     WHERE asset_id = p_asset_id
+       AND incident_type = 'REACTIVE'
+       AND status NOT IN ('DUPLICATE','CANCELLED')
+       AND reported_at >= now() - INTERVAL '180 days';
+
+    v_days      := CURRENT_DATE - COALESCE(v_asset.last_maintenance_date, v_asset.install_date);
+    v_age_years := (CURRENT_DATE - v_asset.install_date) / 365.0;
+
+    v_score := LEAST(40, v_failures * 8)
+             + LEAST(25, 25.0 * v_days / v_interval)
+             + LEAST(15, v_age_years * 2)
+             + v_asset.criticality * 4;
+
+    RETURN ROUND(LEAST(100, v_score), 2);
+END;
+$$;
+
+-- ---------------------------------------------------------------------
 -- FUNCTION: fn_similar_incidents   (VECTOR SIMILARITY SEARCH)
 -- Uses the pgvector cosine-distance operator <=> . The ORDER BY ... LIMIT
 -- pattern lets PostgreSQL use the HNSW index. similarity = 1 - distance.
@@ -314,6 +359,160 @@ $$;
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
+-- PROCEDURE: sp_assign_technician
+-- Auto-assigns the best technician (matching skill, available, lowest
+-- current workload, highest skill) unless one is given explicitly.
+-- Row locks (FOR UPDATE) prevent two managers assigning concurrently.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE sp_assign_technician(
+    p_incident_id    INT,
+    p_assigned_by    INT,
+    p_technician_id  INT DEFAULT NULL,
+    INOUT p_work_order_id INT DEFAULT NULL)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_inc   incidents%ROWTYPE;
+    v_tech  INT := p_technician_id;
+BEGIN
+    SELECT * INTO v_inc FROM incidents WHERE incident_id = p_incident_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Incident % does not exist', p_incident_id;
+    END IF;
+    IF v_inc.status <> 'OPEN' THEN
+        RAISE EXCEPTION 'Only OPEN incidents can be assigned (incident % is %)', p_incident_id, v_inc.status;
+    END IF;
+
+    IF v_tech IS NULL THEN
+        SELECT t.technician_id INTO v_tech
+          FROM technicians t
+          JOIN technician_skills s ON s.technician_id = t.technician_id
+                                  AND s.category_id   = v_inc.category_id
+          JOIN users u             ON u.user_id = t.technician_id AND u.is_active
+          LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS active_jobs
+                  FROM work_orders w
+                 WHERE w.technician_id = t.technician_id
+                   AND w.status IN ('ASSIGNED','IN_PROGRESS')) wl ON TRUE
+         WHERE t.is_available
+           AND wl.active_jobs < t.max_concurrent_jobs
+         ORDER BY wl.active_jobs ASC, s.skill_level DESC, t.technician_id
+         LIMIT 1
+           FOR UPDATE OF t;
+
+        IF v_tech IS NULL THEN
+            RAISE EXCEPTION 'No available technician with the required skill for incident %', p_incident_id;
+        END IF;
+    END IF;
+
+    -- trigger trg_work_order_validate re-checks skill and capacity
+    INSERT INTO work_orders (incident_id, technician_id, assigned_by)
+    VALUES (p_incident_id, v_tech, p_assigned_by)
+    RETURNING work_order_id INTO p_work_order_id;
+
+    UPDATE incidents SET status = 'ASSIGNED' WHERE incident_id = p_incident_id;
+END;
+$$;
+
+-- ---------------------------------------------------------------------
+-- PROCEDURE: sp_complete_work_order   (core TRANSACTION of the system)
+-- In ONE atomic unit:
+--   1. lock the work order, validate owner and state
+--   2. for every spare part used: lock row, check stock, deduct stock,
+--      record usage at today's unit cost
+--   3. compute labour + parts cost, insert maintenance record
+--   4. mark the work order COMPLETED (trigger resolves the incident and
+--      returns the asset to OPERATIONAL)
+-- If ANY step fails (e.g. insufficient stock) everything is rolled back.
+-- p_parts format: '[{"part_id": 3, "quantity": 2}, ...]'
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE sp_complete_work_order(
+    p_work_order_id  INT,
+    p_technician_id  INT,
+    p_labour_hours   NUMERIC,
+    p_notes          TEXT,
+    p_parts          JSONB DEFAULT '[]'::JSONB)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_wo         work_orders%ROWTYPE;
+    v_inc        incidents%ROWTYPE;
+    v_rate       NUMERIC;
+    v_part       RECORD;
+    v_stock      spare_parts%ROWTYPE;
+    v_parts_cost NUMERIC := 0;
+BEGIN
+    SELECT * INTO v_wo FROM work_orders WHERE work_order_id = p_work_order_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Work order % does not exist', p_work_order_id;
+    END IF;
+    IF v_wo.technician_id <> p_technician_id THEN
+        RAISE EXCEPTION 'Work order % is not assigned to this technician', p_work_order_id;
+    END IF;
+    IF v_wo.status NOT IN ('ASSIGNED','IN_PROGRESS') THEN
+        RAISE EXCEPTION 'Work order % is already %', p_work_order_id, v_wo.status;
+    END IF;
+    IF p_notes IS NULL OR char_length(trim(p_notes)) < 10 THEN
+        RAISE EXCEPTION 'Resolution notes must be at least 10 characters';
+    END IF;
+
+    -- make sure the work order passed through IN_PROGRESS (fires sync trigger)
+    IF v_wo.status = 'ASSIGNED' THEN
+        UPDATE work_orders SET status = 'IN_PROGRESS', started_at = now()
+         WHERE work_order_id = p_work_order_id;
+    END IF;
+
+    -- consume spare parts
+    FOR v_part IN
+        SELECT (x->>'part_id')::INT AS part_id, (x->>'quantity')::INT AS qty
+          FROM jsonb_array_elements(p_parts) AS x
+    LOOP
+        IF v_part.qty IS NULL OR v_part.qty <= 0 THEN
+            RAISE EXCEPTION 'Quantity for part % must be positive', v_part.part_id;
+        END IF;
+
+        SELECT * INTO v_stock FROM spare_parts WHERE part_id = v_part.part_id FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Spare part % does not exist', v_part.part_id;
+        END IF;
+        IF v_stock.quantity_in_stock < v_part.qty THEN
+            RAISE EXCEPTION 'Insufficient stock for % (available %, requested %)',
+                v_stock.part_name, v_stock.quantity_in_stock, v_part.qty;
+        END IF;
+
+        INSERT INTO work_order_parts (work_order_id, part_id, quantity_used, unit_cost_at_use)
+        VALUES (p_work_order_id, v_part.part_id, v_part.qty, v_stock.unit_cost)
+        ON CONFLICT (work_order_id, part_id)
+        DO UPDATE SET quantity_used = work_order_parts.quantity_used + EXCLUDED.quantity_used;
+
+        UPDATE spare_parts
+           SET quantity_in_stock = quantity_in_stock - v_part.qty      -- low-stock trigger may fire
+         WHERE part_id = v_part.part_id;
+
+        v_parts_cost := v_parts_cost + v_part.qty * v_stock.unit_cost;
+    END LOOP;
+
+    SELECT hourly_rate INTO v_rate FROM technicians WHERE technician_id = p_technician_id;
+    SELECT * INTO v_inc FROM incidents WHERE incident_id = v_wo.incident_id;
+
+    IF v_inc.asset_id IS NOT NULL THEN
+        INSERT INTO maintenance_records (asset_id, work_order_id, maintenance_type, performed_on,
+                                         labour_cost, parts_cost, notes)
+        VALUES (v_inc.asset_id, p_work_order_id,
+                CASE WHEN v_inc.incident_type = 'PREVENTIVE' THEN 'PREVENTIVE' ELSE 'CORRECTIVE' END,
+                CURRENT_DATE, ROUND(p_labour_hours * v_rate, 2), v_parts_cost, p_notes);
+    END IF;
+
+    UPDATE work_orders
+       SET status = 'COMPLETED', completed_at = now(),
+           labour_hours = p_labour_hours, resolution_notes = p_notes
+     WHERE work_order_id = p_work_order_id;      -- trg_work_order_sync -> incident RESOLVED
+
+    IF v_inc.asset_id IS NOT NULL THEN
+        UPDATE assets SET risk_score = fn_asset_risk_score(asset_id) WHERE asset_id = v_inc.asset_id;
+    END IF;
+END;
+$$;
+
+-- ---------------------------------------------------------------------
 -- PROCEDURE: sp_mark_duplicate
 -- Marks an incident as a duplicate of an original one. The reporter of
 -- the duplicate is added as a co-reporter of the original, which (via
@@ -403,3 +602,65 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------------
+-- PROCEDURE: sp_schedule_preventive_maintenance
+-- Recomputes every asset's risk score; for high-risk assets without an
+-- active incident it raises a PREVENTIVE incident and an alert.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE sp_schedule_preventive_maintenance(
+    p_manager_id  INT,
+    p_threshold   NUMERIC DEFAULT 75,
+    INOUT p_created INT DEFAULT 0)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_asset RECORD;
+    v_new   INT;
+BEGIN
+    p_created := 0;
+    UPDATE assets SET risk_score = fn_asset_risk_score(asset_id)
+     WHERE status <> 'DECOMMISSIONED';
+
+    FOR v_asset IN
+        SELECT a.* FROM assets a
+         WHERE a.status = 'OPERATIONAL'
+           AND a.risk_score >= p_threshold
+           AND NOT EXISTS (SELECT 1 FROM incidents i
+                            WHERE i.asset_id = a.asset_id
+                              AND i.status IN ('OPEN','ASSIGNED','IN_PROGRESS','ON_HOLD'))
+         ORDER BY a.risk_score DESC
+    LOOP
+        INSERT INTO incidents (title, description, incident_type, reported_by, room_id,
+                               asset_id, category_id, severity, affected_users)
+        VALUES (format('Preventive maintenance: %s (%s)', v_asset.asset_name, v_asset.asset_tag),
+                format('System generated preventive maintenance. Asset risk score %s is above threshold %s based on recent failures, time since last service and age.',
+                       v_asset.risk_score, p_threshold),
+                'PREVENTIVE', p_manager_id, v_asset.room_id, v_asset.asset_id,
+                v_asset.category_id, 2, 1)
+        RETURNING incident_id INTO v_new;
+
+        INSERT INTO alerts (alert_type, alert_level, message, target_role, asset_id, incident_id)
+        VALUES ('HIGH_RISK_ASSET', 'WARNING',
+                format('Asset %s has risk score %s - preventive incident #%s created.',
+                       v_asset.asset_tag, v_asset.risk_score, v_new),
+                'FACILITY_MANAGER', v_asset.asset_id, v_new);
+        p_created := p_created + 1;
+    END LOOP;
+END;
+$$;
+
+-- ---------------------------------------------------------------------
+-- PROCEDURE: sp_restock_part
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE sp_restock_part(p_part_id INT, p_quantity INT)
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF p_quantity IS NULL OR p_quantity <= 0 OR p_quantity > 10000 THEN
+        RAISE EXCEPTION 'Restock quantity must be between 1 and 10000';
+    END IF;
+    UPDATE spare_parts SET quantity_in_stock = quantity_in_stock + p_quantity
+     WHERE part_id = p_part_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Spare part % does not exist', p_part_id;
+    END IF;
+END;
+$$;
