@@ -24,12 +24,12 @@ const NAV = {
   FACILITY_MANAGER: [
     ["Operations", [["/queue", "Priority queue"], ["/incidents", "All incidents"], ["/search", "Semantic search"]]],
     ["Planning", [["/analytics", "Analytics"], ["/reports", "Reports"], ["/assets", "Asset health"], ["/inventory", "Spare parts"]]],
-    ["System", [["/vectors", "Vector store"], ["/showcase", "DB showcase"], ["/alerts", "Notifications"]]],
+    ["System", [["/vectors", "Vector store"], ["/nosql", "Document store"], ["/showcase", "DB showcase"], ["/alerts", "Notifications"]]],
   ],
   ADMIN: [
     ["Overview", [["/analytics", "Analytics"], ["/reports", "Reports"], ["/queue", "Priority queue"], ["/incidents", "All incidents"]]],
     ["Manage", [["/admin/users", "Users & roles"], ["/admin/campus", "Campus & SLA"], ["/assets", "Assets"], ["/inventory", "Spare parts"]]],
-    ["System", [["/vectors", "Vector store"], ["/admin/audit", "Audit log"], ["/showcase", "DB showcase"], ["/search", "Semantic search"], ["/alerts", "Notifications"]]],
+    ["System", [["/vectors", "Vector store"], ["/nosql", "Document store"], ["/admin/audit", "Audit log"], ["/showcase", "DB showcase"], ["/search", "Semantic search"], ["/alerts", "Notifications"]]],
   ],
 };
 

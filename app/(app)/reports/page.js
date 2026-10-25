@@ -60,7 +60,7 @@ export default function ReportsPage() {
 
   return (
     <>
-      <PageHead title="Reports" sub="Management reports computed live by aggregate SQL (JOIN, GROUP BY, HAVING, AVG, SUM). Pick a report and a period; download any of them as CSV.">
+      <PageHead title="Reports" sub="Management reports computed live: aggregate SQL in PostgreSQL (JOIN, GROUP BY, HAVING, AVG, SUM) and aggregation pipelines in MongoDB ($match, $unwind, $group, $lookup). Pick a report and a period; download any of them as CSV.">
         <select value={days} onChange={(e) => setDays(e.target.value)} style={{ width: "auto" }} aria-label="Period">
           {PERIODS.map(([v, l]) => (
             <option key={v} value={v}>
@@ -75,25 +75,37 @@ export default function ReportsPage() {
 
       <div className="grid" style={{ gridTemplateColumns: "minmax(240px, 320px) minmax(0, 1fr)", alignItems: "start" }}>
         <nav className="panel" aria-label="Reports">
-          {data.reports.map((r) => (
-            <button
-              key={r.id}
-              onClick={() => setId(r.id)}
-              style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                padding: "11px 14px",
-                border: 0,
-                borderBottom: "1px solid var(--line-2)",
-                borderLeft: `4px solid ${id === r.id ? "var(--signal)" : "transparent"}`,
-                background: id === r.id ? "#fbf7e6" : "transparent",
-                cursor: "pointer",
-              }}
-            >
-              <strong style={{ fontWeight: 600 }}>{r.title}</strong>
-              <div className="small muted">{r.concepts}</div>
-            </button>
+          {[
+            ["postgresql", "PostgreSQL · SQL"],
+            ["mongodb", "MongoDB · aggregation pipeline"],
+          ].map(([engine, label]) => (
+            <div key={engine}>
+              <div className="small" style={{ color: "var(--ink-3)", fontWeight: 600, padding: "12px 14px 6px", borderBottom: "1px solid var(--line-2)", background: "var(--surface-2)" }}>
+                {label}
+              </div>
+              {data.reports
+                .filter((r) => r.engine === engine)
+                .map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => setId(r.id)}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "11px 14px",
+                      border: 0,
+                      borderBottom: "1px solid var(--line-2)",
+                      borderLeft: `4px solid ${id === r.id ? "var(--signal)" : "transparent"}`,
+                      background: id === r.id ? "#fbf7e6" : "transparent",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <strong style={{ fontWeight: 600 }}>{r.title}</strong>
+                    <div className="small muted">{r.concepts}</div>
+                  </button>
+                ))}
+            </div>
           ))}
         </nav>
 
@@ -105,7 +117,7 @@ export default function ReportsPage() {
               <div className="panel-head">
                 <h2>{res.title}</h2>
                 <span className="small muted">
-                  {res.rows.length} row(s), {res.ms} ms, {days ? `last ${days} days` : "all time"}
+                  {res.engine === "mongodb" ? "MongoDB" : "PostgreSQL"}, {res.rows.length} row(s), {res.ms} ms, {days ? `last ${days} days` : "all time"}
                 </span>
               </div>
               {!res.rows.length && <div className="empty">No data in this period. Try a longer period.</div>}
@@ -137,7 +149,7 @@ export default function ReportsPage() {
               )}
               <div className="panel-body" style={{ borderTop: "1px solid var(--line-2)" }}>
                 <button className="btn small ghost" onClick={() => setShowSql((x) => !x)}>
-                  {showSql ? "Hide SQL" : "Show the SQL"}
+                  {showSql ? (res.engine === "mongodb" ? "Hide pipeline" : "Hide SQL") : res.engine === "mongodb" ? "Show the pipeline" : "Show the SQL"}
                 </button>
                 {showSql && (
                   <pre className="sql" style={{ marginTop: 10 }}>
